@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>B站关注摸鱼博主</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 头部 -->
+    <header>
+      <div class="brand-row">
+        <div class="brand">
+          <img class="brand-icon" src="icons/icon-128.png" alt="" />
+          <h1 class="brand-title">关注摸鱼博主</h1>
+        </div>
+        <div class="header-actions">
+          <button id="panel-btn" class="icon-btn" title="在浏览器侧边栏打开" aria-label="在浏览器侧边栏打开">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+              <line x1="15" y1="3" x2="15" y2="21"></line>
+            </svg>
+          </button>
+          <button id="export-btn" class="icon-btn" title="导出 CSV 报告" aria-label="导出 CSV 报告">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </button>
+          <button id="clear-btn" class="icon-btn" title="清空本地缓存" aria-label="清空本地缓存">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              <line x1="10" y1="11" x2="10" y2="17"></line>
+              <line x1="14" y1="11" x2="14" y2="17"></line>
+            </svg>
+          </button>
+          <button id="cancel-btn" class="icon-btn is-hidden" title="停止查询" aria-label="停止查询">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2"></rect>
+            </svg>
+          </button>
+          <button id="refresh-btn" class="icon-btn" title="重新查询" aria-label="重新查询">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="summary-row">
+        <span class="summary-dot" aria-hidden="true"></span>
+        <span id="stats" class="summary-text">—</span>
+        <span id="updated-at" class="updated-at"></span>
+      </div>
+
+      <div class="toolbar">
+        <label class="field-label" for="uid-input">UID</label>
+        <input type="number" id="uid-input" placeholder="请输入 B 站 UID" />
+        <button id="uid-save-btn" class="btn-primary">保存并查询</button>
+      </div>
+
+      <div class="toolbar">
+        <div class="search-box">
+          <span class="search-icon" aria-hidden="true">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="7"></circle>
+              <line x1="20" y1="20" x2="16.5" y2="16.5"></line>
+            </svg>
+          </span>
+          <input type="search" id="search-input" placeholder="搜索昵称或 UID" aria-label="搜索 UP 主" />
+        </div>
+        <button id="filter-btn" class="chip" title="点击切换是否显示异常数据" aria-pressed="true">
+          <span id="filter-icon" class="chip-icon" aria-hidden="true"></span>
+          <span id="filter-text">隐藏异常</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- 状态条 / 进度 -->
+    <div id="status-bar" class="status-bar is-hidden">
+      <div class="status-info">
+        <span id="status-stage" class="status-stage">正在初始化…</span>
+        <span id="status-count" class="status-count">0/0</span>
+      </div>
+      <div class="progress-track" id="progress-bar" role="progressbar"
+           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="查询进度">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+    </div>
+
+    <!-- 提示条 -->
+    <div id="alert" class="alert is-hidden" role="alert">
+      <span id="alert-icon" class="alert-icon" aria-hidden="true"></span>
+      <span id="alert-text" class="alert-text"></span>
+      <button id="alert-close" class="alert-close" title="关闭提示" aria-label="关闭提示">
+        <svg class="icon icon-sm" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+
+    <!-- 列表：按停更时长分组渲染，分组容器由 popup.js 动态构建 -->
+    <main>
+      <div id="list"></div>
+    </main>
+
+    <!-- 批量操作条 -->
+    <div id="bulk-bar" class="bulk-bar is-hidden">
+      <span class="bulk-count" id="bulk-count">已选 0 项</span>
+      <div class="bulk-actions">
+        <button id="bulk-open" class="btn-ghost">打开主页</button>
+        <button id="bulk-copy" class="btn-ghost">复制 UID</button>
+        <button id="bulk-unfollow" class="btn-danger">批量取关</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 二次确认弹层 -->
+  <div id="confirm-mask" class="mask is-hidden">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+      <h2 class="dialog-title" id="dialog-title">确认批量取关</h2>
+      <div class="dialog-body" id="dialog-body"></div>
+      <div class="dialog-actions">
+        <button id="confirm-cancel" class="btn-ghost">取消</button>
+        <button id="confirm-ok" class="btn-danger">确认取关</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

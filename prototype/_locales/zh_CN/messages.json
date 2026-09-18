@@ -1,0 +1,10 @@
+{
+  "extensionName": {
+    "message": "B站关注摸鱼博主",
+    "description": "扩展名称。显示在浏览器工具栏、扩展管理页与 Edge 加载项商店页面。"
+  },
+  "extensionDescription": {
+    "message": "按停更时长分组展示你关注的 B 站 UP 主，抓出偷懒摸鱼或退圈的账号，支持批量取关、CSV 导出与侧边栏模式",
+    "description": "扩展简短描述，显示在扩展管理页与商店列表页。长度上限 132 字符。"
+  }
+}
