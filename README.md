@@ -309,8 +309,7 @@ bili-follow-recency/
 ├── CONTRIBUTING.md            # 贡献指南
 ├── .gitignore
 ├── docs/
-│   ├── UX-AUDIT.md            # 体验优化调整报告（功能 / 交互 / 视觉审查与优先级）
-│   └── EDGE-SUBMISSION.md     # Edge Add-ons 提交材料与自检清单
+│   └── UX-AUDIT.md            # 体验优化调整报告（功能 / 交互 / 视觉审查与优先级）
 ├── scripts/
 │   └── build-zip.js           # 打包脚本（零依赖，保证 ZIP 路径分隔符合规）
 ├── assets/                    # 文档用素材（logo 源图，不参与打包）
@@ -364,8 +363,6 @@ node scripts/build-zip.js
 ```
 
 脚本只打包 `prototype/` 目录，并自行写入 ZIP 结构以保证条目路径使用**正斜杠**。**请勿用系统自带压缩工具替代**——Windows 的 `Compress-Archive` 会写入反斜杠路径（`icons\icon-16.png`），不符合 ZIP 规范，会导致浏览器商店解析不到图标、跨平台解压产生错误文件名。
-
-提交到 Microsoft Edge Add-ons 所需的商店文案、图片规格、审核说明与自检清单，见 [docs/EDGE-SUBMISSION.md](docs/EDGE-SUBMISSION.md)。
 
 ### 代码风格
 
