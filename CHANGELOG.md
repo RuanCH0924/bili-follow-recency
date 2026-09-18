@@ -40,7 +40,7 @@
 
 - 新增 [PRIVACY.md](PRIVACY.md)：隐私政策，逐项说明数据读取范围、存储位置、网络请求目标与权限用途
 - 新增 `scripts/build-zip.js`：零依赖打包脚本，自行写入 ZIP 结构以保证条目路径使用正斜杠。Windows 上常用的 `Compress-Archive` 会写入反斜杠路径，违反 ZIP 规范
-- 新增 [docs/EDGE-SUBMISSION.md](docs/EDGE-SUBMISSION.md)：商店文案、图片规格、给审核员的测试说明、自检清单与常见拒审原因应对
+- 新增 `docs/EDGE-SUBMISSION.md`（商店提交材料，不随仓库发布）：商店文案、图片规格、给审核员的测试说明、自检清单与常见拒审原因应对
 - **启用清单级本地化**：新增 `prototype/_locales/zh_CN/messages.json`，manifest 的 `name` / `description` / `action.default_title` 改用 `__MSG_` 占位符，并声明 `"default_locale": "zh_CN"`。Edge Partner Center 依据 `_locales` 中的消息引用识别可用语言——此前使用硬编码字符串，导致商店列表只出现「英语（美国）」一个语言选项
 - 精简 `host_permissions`：移除被 `https://*.bilibili.com/*` 覆盖的 `https://api.bilibili.com/*`
 - logo 源素材从 `prototype/icons/` 移至 `assets/`，避免 2.3MB 的非必要文件被打进发布包
