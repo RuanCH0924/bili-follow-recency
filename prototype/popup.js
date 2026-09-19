@@ -54,13 +54,15 @@ const $alertClose = document.getElementById('alert-close');
 const $btn = document.getElementById('refresh-btn');
 const $cancelBtn = document.getElementById('cancel-btn');
 const $panelBtn = document.getElementById('panel-btn');
+const $settingsBtn = document.getElementById('settings-btn');
 const $exportBtn = document.getElementById('export-btn');
 const $clearBtn = document.getElementById('clear-btn');
 
-// 侧边栏模式：manifest 的 side_panel.default_path 带 ?mode=panel；
-// 视口高度兜底判断（popup 高度上限 600，侧边栏通常更高）
-const IS_PANEL = new URLSearchParams(location.search).get('mode') === 'panel'
-  || window.innerHeight > 620;
+// 侧边栏模式：popup 的宽度固定 400px、高度上限 600px，
+// 侧边栏则占满整个侧栏高度。据此区分两种宿主环境，
+// 避免依赖 manifest 的 default_path 带 query 参数（部分版本不接受）
+const viewportIsPopupSized = window.innerWidth <= 400 && window.innerHeight <= 620;
+const IS_PANEL = !viewportIsPopupSized;
 
 if (IS_PANEL) {
   document.body.classList.add('is-panel');
@@ -138,10 +140,13 @@ function updateStats() {
   }
 
   const errorCount = Array.from(itemIndex.values()).filter(v => isErrorItem(v.item)).length;
+  // 「已查询」统计的是真正拿到数据的条数，失败的条目不计入：
+  // 这样批量重试把失败项救回来后，这个数字会跟着涨，能直观看出重试的成效
+  const okCount = queried - errorCount;
   const total = totalFromBackend > 0 ? totalFromBackend : queried;
-  const text = total > queried
-    ? `已查询 ${queried} / 共 ${total} 个关注`
-    : `已查询 ${queried} 个关注`;
+  const text = total > okCount
+    ? `已查询 ${okCount} / 共 ${total} 个关注`
+    : `已查询 ${okCount} 个关注`;
 
   $stats.appendChild(document.createTextNode(text));
 
@@ -166,6 +171,20 @@ function renderUpdatedAt() {
   $updatedAt.textContent = `更新于 ${formatTimeAgo(Math.floor(updatedAt / 1000))}`;
   $updatedAt.classList.toggle('is-old', Date.now() - updatedAt > UPDATED_WARN_MS);
 }
+
+// 相对时间文案会随真实时间推移而过时。
+// 单项刷新 / 批量重试完成后统一重算一次，保证列表里所有时间基于同一时刻
+function refreshTimeLabels() {
+  for (const entry of itemIndex.values()) {
+    if (!entry.li || isErrorItem(entry.item)) continue;
+    const time = entry.li.querySelector('.up-time');
+    if (time) time.textContent = formatTimeAgo(entry.item.lastVideoAt);
+  }
+  renderUpdatedAt();
+}
+
+// popup 长时间开着时，每分钟校准一次相对时间
+setInterval(refreshTimeLabels, 60 * 1000);
 
 function clearAlertTimer() {
   if (noticeTimer) {
@@ -681,12 +700,14 @@ async function refreshOneItem(mid) {
   const next = { mid, name: entry.item.name, face: entry.item.face, ...resp.stat };
   syncItem(next); // syncItem 会重建该行节点并归入新的分组
   updateStats();
+  refreshTimeLabels(); // 其它条目的相对时间一并对齐到同一时刻
   showNotice(`已更新 ${next.name}`);
 }
 
 // 批量重试所有查询失败的 UP 主
+// 具体的重试由 background 执行：popup 关闭后任务继续跑，结果也会逐条写回缓存。
+// 这里只负责发起任务、消费流式消息（在 attachStreamListener 里）、最后给出结论
 let retrying = false;
-const RETRY_CONCURRENCY = 3;
 
 async function retryFailed() {
   if (retrying) return;
@@ -700,57 +721,31 @@ async function retryFailed() {
   retrying = true;
   hideAlert();
   setBusy(true);
+  showIndeterminateProgress('正在重新查询失败的 UP 主');
 
-  const total = queue.length;
-  const startAt = Date.now();
-  let done = 0;
-  let okCount = 0;
-  let failCount = 0;
-
-  const step = () => {
-    done++;
-    const elapsed = Date.now() - startAt;
-    const eta = done > 0 ? Math.round((elapsed / done) * (total - done)) : 0;
-    showProgress('正在重试失败的 UP 主', done, total, formatEta(eta));
-  };
-
-  showProgress('正在重试失败的 UP 主', 0, total, '');
-
-  // 小并发串行推进队列：queue.shift() 在单线程下不会产生竞态
-  const worker = async () => {
-    while (queue.length > 0) {
-      const entry = queue.shift();
-      const mid = entry.item.mid;
-      if (entry.li) entry.li.classList.add('is-loading');
-
-      const resp = await chrome.runtime.sendMessage({ type: 'refresh-one', mid }).catch(() => null);
-
-      if (resp && resp.ok) {
-        okCount++;
-        syncItem({ mid, name: entry.item.name, face: entry.item.face, ...resp.stat });
-      } else {
-        failCount++;
-        if (entry.li) entry.li.classList.remove('is-loading');
-      }
-
-      step();
-      updateStats();
-      refreshEmptyState();
-    }
-  };
-
-  await Promise.all(Array.from({ length: Math.min(RETRY_CONCURRENCY, total) }, worker));
+  const resp = await chrome.runtime.sendMessage({ type: 'retry-failed', mid: currentUid }).catch(() => null);
 
   retrying = false;
   setBusy(false);
   finishProgress();
   updateStats();
   refreshEmptyState();
+  refreshTimeLabels(); // 与单项刷新保持一致：全列表时间基准统一
 
-  if (failCount === 0) {
-    showNotice(`已重新查询 ${okCount} 个 UP 主，全部成功`);
+  if (!resp || resp.ok === false) {
+    showAlert((resp && resp.error) || '重新查询失败，请重试');
+    return;
+  }
+  if (resp.canceled) {
+    showNotice('重新查询被新的查询中断');
+    return;
+  }
+  if (resp.total === 0) {
+    showNotice('没有需要重新查询的 UP 主');
+  } else if (resp.failCount === 0) {
+    showNotice(`已重新查询 ${resp.okCount} 个 UP 主，全部成功`);
   } else {
-    showAlert(`${okCount} 个成功，${failCount} 个仍然失败`);
+    showAlert(`${resp.okCount} 个成功，${resp.failCount} 个仍然失败`);
   }
 }
 
@@ -861,6 +856,12 @@ $exportBtn.addEventListener('click', () => {
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
   downloadFile(`bili-follow-${currentUid}-${stamp}.csv`, buildCsv());
   showNotice(`已导出 ${itemIndex.size} 条记录`);
+});
+
+// ---- 设置页 ----
+$settingsBtn.addEventListener('click', () => {
+  chrome.runtime.openOptionsPage();
+  window.close();
 });
 
 // ---- 侧边栏 ----
@@ -989,7 +990,11 @@ function attachStreamListener() {
         totalFromBackend = p.total; // 记下 B 站返回的真实总数
         showProgress('获取关注列表', p.current, p.total, '');
       } else if (p.stage === 'stats') {
-        showProgress('查询更新时间', p.current, p.total, formatEta(p.etaMs));
+        // label 由 background 给出，区分「全量查询」与「批量重试」
+        showProgress(p.label || '查询更新时间', p.current, p.total, formatEta(p.etaMs));
+      } else if (p.stage === 'cooldown') {
+        // 风控冷却：进度条停在当前位置，文案显示倒计时，避免看起来像卡死
+        showProgress(p.label, p.current, p.total, '');
       }
     } else if (msg.type === 'unfollow-progress') {
       const p = msg.payload;
@@ -997,19 +1002,23 @@ function attachStreamListener() {
     } else if (msg.type === 'task-state') {
       const t = msg.payload;
       if (t.mid && t.mid !== currentUid) return;
+      const isRetry = t.kind === 'retry';
       if (t.status === 'running') {
         setBusy(true);
+        if (isRetry) showIndeterminateProgress('正在重新查询失败的 UP 主');
       } else if (t.status === 'done') {
         setBusy(false);
         finishProgress();
-        updatedAt = t.finishedAt || Date.now();
-        renderUpdatedAt();
+        // 重试只是补查失败项，「上次全量查询时间」不应被它刷新
+        if (!isRetry) updatedAt = t.finishedAt || Date.now();
         updateStats();
         if (itemIndex.size === 0) {
           renderEmpty('暂无关注', '快去 B 站关注一些 UP 主吧');
         } else {
           refreshEmptyState();
         }
+        // 流式查询跨越数分钟时，各行时间基于不同时刻算出，这里统一重算
+        refreshTimeLabels();
       } else if (t.status === 'error') {
         setBusy(false);
         hideProgress();
@@ -1067,9 +1076,11 @@ async function loadPrefs() {
 }
 
 async function savePrefs() {
+  // 合并写入，避免覆盖设置页存进同一个键里的反风控开关
+  const prefs = await loadPrefs();
   return new Promise((resolve) => {
     chrome.storage.local.set({
-      [PREFS_KEY]: { hideErrorItems }
+      [PREFS_KEY]: { ...prefs, hideErrorItems }
     }, resolve);
   });
 }
@@ -1228,7 +1239,8 @@ async function bootstrap() {
 
   if (task.status === 'running') {
     setBusy(true);
-    showIndeterminateProgress('后台查询中');
+    // 后台任务可能是上一次没跑完的全量查询，也可能是批量重试
+    showIndeterminateProgress(task.kind === 'retry' ? '正在重新查询失败的 UP 主' : '后台查询中');
   } else if (task.status === 'error') {
     setBusy(false);
     showAlert(task.error || '上次查询失败');

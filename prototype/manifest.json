@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "default_locale": "zh_CN",
   "name": "__MSG_extensionName__",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "__MSG_extensionDescription__",
   "permissions": [
     "cookies",
@@ -32,6 +32,10 @@
     }
   },
   "side_panel": {
-    "default_path": "popup.html?mode=panel"
+    "default_path": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   }
 }

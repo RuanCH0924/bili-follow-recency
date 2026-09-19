@@ -1,0 +1,372 @@
+/* ============================================================
+   设置页样式
+   复用 popup.css 中的设计 Token 与按钮组件，
+   这里只写页面级布局与设置页专属组件（开关 / 利弊说明）
+   ============================================================ */
+
+/* 覆盖 popup 的固定尺寸，改为普通网页布局 */
+body.options-page {
+  width: auto;
+  max-width: none;
+  max-height: none;
+  height: auto;
+  overflow: auto;
+  background: var(--bg-base);
+}
+
+.wrap {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--sp-6) var(--sp-4);
+}
+
+/* === 页头 === */
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-5);
+}
+
+.page-head .brand-icon {
+  width: 40px;
+  height: 40px;
+}
+
+.page-title {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.page-sub {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+
+/* === 说明区 === */
+.intro {
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.intro-title {
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.intro-text {
+  font-size: var(--fs-sm);
+  line-height: 1.75;
+  color: var(--text-secondary);
+}
+
+.intro-note {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px dashed var(--border);
+  font-size: var(--fs-sm);
+  line-height: 1.75;
+  color: var(--state-stale);
+}
+
+code {
+  padding: 1px var(--sp-1);
+  border-radius: var(--r-sm);
+  background: var(--surface-alt);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  color: var(--text-primary);
+}
+
+/* === 开关卡片 === */
+.switch-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.switch-card {
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.switch-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.switch-title h3 {
+  font-size: var(--fs-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.switch-title p {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+
+/* === 开关组件 === */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+}
+
+.switch-track {
+  display: block;
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: var(--r-pill);
+  background: var(--border-strong);
+  transition: background var(--dur-base) var(--ease-out);
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-pill);
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.switch input:checked + .switch-track {
+  background: var(--brand);
+}
+
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(20px);
+}
+
+.switch input:focus-visible + .switch-track {
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+
+/* === 分段选择器（并发数）=== */
+.segmented {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-alt);
+  overflow: hidden;
+}
+
+.seg-item {
+  position: relative;
+  cursor: pointer;
+}
+
+.seg-item + .seg-item {
+  border-left: 1px solid var(--border-strong);
+}
+
+.seg-item input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+}
+
+.seg-item span {
+  display: block;
+  min-width: 32px;
+  padding: var(--sp-1) 0;
+  text-align: center;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  transition: background var(--dur-base) var(--ease-out),
+              color var(--dur-base) var(--ease-out);
+}
+
+.seg-item:hover span {
+  background: var(--brand-soft);
+}
+
+.seg-item input:checked + span {
+  background: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+
+.seg-item input:focus-visible + span {
+  box-shadow: inset 0 0 0 2px var(--brand-glow);
+}
+
+/* === 利弊说明 === */
+.pros-cons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.pc-block {
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+}
+
+.pc-block.is-pro {
+  background: rgba(13, 122, 95, 0.07);
+}
+
+.pc-block.is-con {
+  background: rgba(179, 84, 30, 0.07);
+}
+
+.pc-badge {
+  display: inline-block;
+  margin-bottom: var(--sp-2);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.is-pro .pc-badge {
+  background: rgba(13, 122, 95, 0.14);
+  color: var(--state-fresh);
+}
+
+.is-con .pc-badge {
+  background: rgba(179, 84, 30, 0.14);
+  color: var(--state-stale);
+}
+
+.pc-block ul {
+  padding-left: var(--sp-4);
+  line-height: 1.75;
+  color: var(--text-secondary);
+}
+
+.pc-block li + li {
+  margin-top: var(--sp-1);
+}
+
+/* === 页脚 === */
+.page-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-5);
+}
+
+.save-hint {
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+  transition: color var(--dur-base) var(--ease-out);
+}
+
+.save-hint.is-saved {
+  color: var(--state-fresh);
+  font-weight: 600;
+}
+
+/* === 关于 === */
+.about {
+  margin-top: var(--sp-4);
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.about-title {
+  margin-bottom: var(--sp-3);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.about-list {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+}
+
+.about-label {
+  color: var(--text-tertiary);
+}
+
+.about-value {
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.about-link {
+  color: var(--brand-ink);
+  text-decoration: none;
+}
+
+.about-link:hover {
+  text-decoration: underline;
+}
+
+.about-link:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* === 窄屏适配 === */
+@media (max-width: 640px) {
+  .pros-cons {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* === 深色模式：覆盖内联的浅色 rgba === */
+@media (prefers-color-scheme: dark) {
+  .pc-block.is-pro {
+    background: rgba(78, 207, 164, 0.1);
+  }
+
+  .pc-block.is-con {
+    background: rgba(240, 160, 106, 0.1);
+  }
+
+  .is-pro .pc-badge {
+    background: rgba(78, 207, 164, 0.18);
+  }
+
+  .is-con .pc-badge {
+    background: rgba(240, 160, 106, 0.18);
+  }
+
+  .switch-thumb {
+    background: #e8ecf3;
+  }
+}
