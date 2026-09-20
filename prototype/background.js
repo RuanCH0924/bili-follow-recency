@@ -1,4 +1,4 @@
-// background.js - 后台服务：关注列表拉取 / 最近更新查询 / 任务状态机 / 缓存 / 批量取关
+// background.js - 后台服务：关注列表拉取 / 最近更新查询 / 任务状态机 / 缓存 / 批量取关 / 自动化
 // 版本号以 manifest.json 为准
 
 const BILI_API = 'https://api.bilibili.com';
@@ -12,6 +12,12 @@ const CACHE_KEY = 'bili_follow_cache';
 // 注意：此键必须与 popup.js / options.js 中的 PREFS_KEY 保持一致
 const PREFS_KEY = 'bili_prefs';
 const BUVID4_KEY = 'bili_buvid4';
+// 注意：此键必须与 popup.js 中的 UID_KEY 保持一致
+const UID_KEY = 'bili_uid';
+// 界面形态记忆（上次用的是弹窗还是侧边栏）；注意：此键必须与 popup.js 中的 UI_KEY 保持一致
+const UI_KEY = 'bili_ui';
+// 图标默认弹出 popup；切成侧边栏模式后要把它摘掉
+const POPUP_PATH = 'popup.html';
 
 // ---- 反风控（-352 风控校验失败）相关 ----
 // 命中这些 code 说明整个请求链路已被限流，而不是单个 UP 主没数据
@@ -41,6 +47,23 @@ const COOLDOWN = {
   maxHits: 3            // 单次任务内连续触发 3 次即中止
 };
 
+// ---- 自动化（设置页的「自动化」区块）相关 ----
+// 自动更新：由 chrome.alarms 定时唤醒 Service Worker 跑一次全量查询
+const AUTO_ALARM = 'bili_auto_update';
+// 自动更新最短间隔（分钟）：过于频繁既无意义，也容易撞上 B 站风控
+const AUTO_UPDATE_MIN_MINUTES = 5;
+const AUTO_UPDATE_MAX_MINUTES = 24 * 60;
+// 自动重查失败项的等待步长：第 n 轮等待 5×n 秒（5 / 10 / 15 / 20 …），单轮最长 30 秒
+const AUTO_RETRY_STEP_MS = 5000;
+const AUTO_RETRY_MAX_WAIT_MS = 30000;
+// 自动重查的轮数上限：到达后停下来交给用户，避免无意义地长时间重试
+const AUTO_RETRY_MAX_ROUNDS = 10;
+// 连续多少轮失败数没有减少就判定「再重试也没用」并停止（通常是 B 站要求人工验证）
+const AUTO_RETRY_STUCK_ROUNDS = 2;
+
+// 各自动化开关的默认值；用户可在设置页调整
+const DEFAULT_AUTO = { autoUpdate: false, intervalMin: 60, autoRetry: false };
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 拟人化节奏是否生效（任务开始时按设置写入，供各请求辅助函数读取）
@@ -67,6 +90,32 @@ async function getAntiRiskConfig() {
   });
 }
 
+// 自动更新的间隔同样可能被手工改坏，统一夹到合法区间
+function normalizeInterval(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_AUTO.intervalMin;
+  return Math.min(AUTO_UPDATE_MAX_MINUTES, Math.max(AUTO_UPDATE_MIN_MINUTES, Math.round(n)));
+}
+
+async function getAutoConfig() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([PREFS_KEY], (data) => {
+      const saved = (data[PREFS_KEY] || {}).auto || {};
+      resolve({
+        autoUpdate: saved.autoUpdate ?? DEFAULT_AUTO.autoUpdate,
+        intervalMin: normalizeInterval(saved.intervalMin),
+        autoRetry: saved.autoRetry ?? DEFAULT_AUTO.autoRetry
+      });
+    });
+  });
+}
+
+function getStoredUid() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([UID_KEY], (d) => resolve(d[UID_KEY] || null));
+  });
+}
+
 // 请求间隔：开启拟人化时加入随机抖动，避免完全均匀的机器特征
 function nextInterval() {
   return REQUEST_INTERVAL + (pacingEnabled ? Math.random() * PACING.intervalJitter : 0);
@@ -79,6 +128,20 @@ class RiskControlError extends Error {
     this.name = 'RiskControlError';
     this.isRiskControl = true;
     this.code = code;
+  }
+}
+
+// 该 UP 主确实没有任何公开动态（账号注销 / 被封禁 / 从未投稿）
+// 这是"查到了，但结果为空"，不是查询失败，也不该被当成风控或网络问题反复重查。
+// 注意：这条文案同时是识别老缓存的数据标识（老版本只存了文案、没有 noDynamic 标记），
+// 必须与 popup.js 的 NO_DYNAMIC_MESSAGE 保持一致
+const NO_DYNAMIC_MESSAGE = '该 UP 主无公开动态';
+
+class NoDynamicError extends Error {
+  constructor() {
+    super(NO_DYNAMIC_MESSAGE);
+    this.name = 'NoDynamicError';
+    this.isNoDynamic = true;
   }
 }
 
@@ -109,7 +172,9 @@ const task = {
   runId: 0,
   startedAt: 0,
   finishedAt: 0,
-  error: null
+  error: null,
+  // 任务正常结束、但需要用户手动处理时的提示（如自动重查连续无进展，需人工验证）
+  notice: null
 };
 
 // 递增令牌：每次启动新任务都会让旧任务失效，避免并发双跑导致重复请求与重复项
@@ -177,13 +242,23 @@ async function saveCache(items, mid) {
   }));
 }
 
-// 与 popup.js 的 isErrorItem 保持一致：要么带 error 字段，要么压根没有可用更新时间
+// 与 popup.js 的 isNoDynamicItem 保持一致：老缓存里只有文案、没有 noDynamic 标记
+function isNoDynamicItem(item) {
+  return Boolean(item.noDynamic) || item.error === NO_DYNAMIC_MESSAGE;
+}
+
+// 与 popup.js 的 isErrorItem 保持一致：要么带 error 字段，要么压根没有可用更新时间。
+// 「该 UP 主无公开动态」已单独归类，不算失败 —— 否则列表里看不出它、重试队列里却算上它，
+// 「2 个成功，1 个仍然失败」这类对不上账的提示就是这么来的
 function isFailedItem(item) {
+  if (isNoDynamicItem(item)) return false;
   return Boolean(item.error) || !item.lastVideoAt;
 }
 
-// 单项刷新 / 批量重试后，只更新缓存里的对应条目
+// 单项刷新 / 批量重试 / 自动重查后，只更新缓存里的对应条目
 // ts 表示"上次全量查询时间"，单项刷新不应改变它，否则时效提示会失真
+// stat 是查询结果：成功时清掉失败标记；失败时保留 error，带 noDynamic 的连标记一起落盘
+// （老缓存里只有文案没有标记，不补标记的话下次重试又会被当成失败项）
 async function patchCachedItem(mid, stat) {
   return withCacheLock(async () => {
     const cached = await readCache();
@@ -193,7 +268,12 @@ async function patchCachedItem(mid, stat) {
     if (!target) return;
 
     Object.assign(target, stat);
-    delete target.error;
+    if (stat.error) {
+      if (stat.noDynamic) target.noDynamic = true;
+    } else {
+      delete target.error;
+      delete target.noDynamic;
+    }
 
     return new Promise((resolve) => {
       chrome.storage.local.set({
@@ -410,7 +490,7 @@ async function fetchUpLatest(mid, sessdata, signal) {
     lastError = e;
   }
 
-  throw lastError || new Error('该 UP 主无公开动态');
+  throw lastError || new NoDynamicError();
 }
 
 // 单个 UP 主查询失败时重试一次（取消与风控场景不重试）
@@ -421,6 +501,8 @@ async function fetchUpLatestWithRetry(mid, sessdata, signal) {
     if (signal?.aborted) throw e;
     // 风控靠"重试"解决不了，立即上抛交给上层熔断
     if (e.isRiskControl) throw e;
+    // 有没有公开动态是确定性结果，重试也不会改变
+    if (e.isNoDynamic) throw e;
     // 开启拟人化时用更长的退避 + 随机抖动，避免规律性的重试节奏
     const base = pacingEnabled ? RETRY_DELAY * 3 : RETRY_DELAY;
     await sleep(base + Math.random() * base * 0.6);
@@ -429,8 +511,261 @@ async function fetchUpLatestWithRetry(mid, sessdata, signal) {
   }
 }
 
+// 推送消息给 popup：统一带上 mid / runId，popup 端据此过滤，避免切换 UID 时数据串台
+function pushTaskMessage(runId, msg) {
+  if (isStale(runId)) return;
+  chrome.runtime.sendMessage(msg).catch(() => {});
+}
+
+// ---- 组 2：风控冷却 ----
+// 命中风控后暂停整个队列并倒计时，而不是继续发请求把风控越撞越深
+async function cooldownAfterRisk({ mid, runId, state, current, total }) {
+  const waitMs = COOLDOWN.minMs + Math.random() * (COOLDOWN.maxMs - COOLDOWN.minMs);
+  const endAt = Date.now() + waitMs;
+
+  while (Date.now() < endAt) {
+    if (isStale(runId)) return;
+    const left = Math.max(1, Math.ceil((endAt - Date.now()) / 1000));
+    pushTaskMessage(runId, {
+      type: 'progress',
+      payload: {
+        mid, runId, stage: 'cooldown', current, total, etaMs: 0,
+        label: `触发 B 站风控，${left} 秒后自动继续（第 ${state.cooldownHit} 次）`
+      }
+    });
+    await sleep(1000);
+  }
+}
+
+// 并发查询一批 UP 主的最近更新：命中风控时只重试被拦截的条目（受 antiRisk.cooldown 控制），
+// 结果逐条推送给 popup；onItem 让调用方在每条结果产生时就地处理（写回缓存 / 更新结果集）
+// stopOnRisk=true 时（自动重查阶段）命中风控不再冷却续跑，而是停下整轮并回报 riskStopped，
+// 因为这时的失败几乎都是「平台要求人工验证」，继续撞只会让风控加深
+// 返回 { canceled, items, riskStopped? }，items 的顺序与传入的 followings 一致
+async function queryFollowings({ followings, mid, runId, sessdata, signal, antiRisk, state, label, onItem, stopOnRisk = false }) {
+  const total = followings.length;
+  const concurrency = antiRisk.concurrency;
+  const items = [];
+  let processed = 0;
+  let sincePause = 0;
+  // 命中风控导致整轮提前结束（仅 stopOnRisk 模式会置位）
+  let riskStopped = false;
+  const queryStartAt = Date.now();
+
+  // 推送"开始查询"进度（含 ETA 估算）
+  const avgMs = 200; // 假设平均 200ms/请求
+  pushTaskMessage(runId, {
+    type: 'progress',
+    payload: {
+      mid, runId, stage: 'stats', current: 0, total, startedAt: queryStartAt,
+      etaMs: Math.round((total / concurrency) * avgMs), label
+    }
+  });
+
+  for (let i = 0; i < total; i += concurrency) {
+    if (isStale(runId)) return { canceled: true, items };
+
+    let batch = followings.slice(i, i + concurrency);
+    // 用 Map 累积每一轮的结果：命中风控时只重试被拦截的条目，
+    // 同一批里已经成功的条目必须先收好，否则会在下一轮被整体丢弃
+    const settledItems = new Map();
+
+    while (true) {
+      const settled = await Promise.all(batch.map(async (up) => {
+        const base = { mid: up.mid, name: up.uname, face: up.face };
+        try {
+          const stat = await fetchUpLatestWithRetry(up.mid, sessdata, signal);
+          return {
+            item: {
+              ...base,
+              lastVideoAt: stat.lastAt,
+              lastVideoName: stat.lastName,
+              type: stat.type,
+              isTop: stat.isTop,
+              polluted: stat.polluted || false,
+              source: stat.source
+            }
+          };
+        } catch (e) {
+          if (e.isRiskControl) return { risk: true, up, base };
+          const item = { ...base, error: e.message };
+          // 无公开动态是「查到了，但结果为空」，标记出来供列表单独分组
+          if (e.isNoDynamic) item.noDynamic = true;
+          return { item };
+        }
+      }));
+
+      for (const s of settled) {
+        if (!s.risk) settledItems.set(s.item.mid, s.item);
+      }
+
+      const risked = settled.filter((s) => s.risk);
+
+      if (risked.length === 0) break;
+
+      // 自动重查阶段（stopOnRisk）：风控一旦命中就收手。被拦截的条目仍按失败记下、
+      // 同批已成功的条目继续保留，然后结束整轮 —— 这时继续冷却续跑没有意义，
+      // 失败的根本原因是平台要求人工验证，得交给用户去点一次 UP 主主页
+      if (stopOnRisk) {
+        for (const s of risked) {
+          settledItems.set(s.base.mid, { ...s.base, error: 'B 站风控拦截，请稍后再试' });
+        }
+        riskStopped = true;
+        break;
+      }
+
+      // 熔断开关关闭时退化为旧行为：把风控直接当作这几条查询失败
+      if (!antiRisk.cooldown) {
+        for (const s of risked) {
+          settledItems.set(s.base.mid, { ...s.base, error: 'B 站风控拦截，请稍后再试' });
+        }
+        break;
+      }
+
+      state.cooldownHit++;
+      if (state.cooldownHit > COOLDOWN.maxHits) {
+        throw new Error(`连续 ${COOLDOWN.maxHits} 次触发 B 站风控，已中止本次查询。${MANUAL_VERIFY_HINT}`);
+      }
+
+      await cooldownAfterRisk({ mid, runId, state, current: processed, total });
+      if (isStale(runId)) return { canceled: true, items };
+
+      batch = risked.map((s) => s.up);
+    }
+
+    // 按原始批次顺序输出，保证结果顺序稳定
+    const results = followings
+      .slice(i, i + concurrency)
+      .map((up) => settledItems.get(up.mid))
+      .filter(Boolean);
+
+    if (isStale(runId)) return { canceled: true, items };
+
+    for (const item of results) {
+      items.push(item);
+      if (onItem) await onItem(item);
+      pushTaskMessage(runId, { type: 'item', payload: { mid, runId, item } });
+    }
+
+    // 因风控停轮：本批结果已经推给 popup 并（在自动重查里）落了盘，直接回报调用方
+    if (riskStopped) return { canceled: false, items, riskStopped: true };
+
+    processed += results.length;
+    // 推送进度 + 动态 ETA
+    const elapsed = Date.now() - queryStartAt;
+    const avgPerItem = elapsed / processed;
+    pushTaskMessage(runId, {
+      type: 'progress',
+      payload: {
+        mid, runId, stage: 'stats', current: processed, total,
+        etaMs: Math.max(0, Math.round((total - processed) * avgPerItem)), label
+      }
+    });
+
+    await sleep(nextInterval());
+
+    // 组 1：每处理满一批插入一次随机停顿，打断长时间恒定的请求节奏
+    sincePause += results.length;
+    if (antiRisk.pacing && sincePause >= PACING.pauseEvery) {
+      sincePause = 0;
+      await sleep(PACING.pauseMin + Math.random() * (PACING.pauseMax - PACING.pauseMin));
+    }
+  }
+
+  return { canceled: false, items };
+}
+
+// ---- 自动重查失败项 ----
+// 全部查询结束后循环补查「查询失败」的条目，直到失败数归零。收敛条件有四条：
+//   1. 失败数归零 → 正常结束
+//   2. 本轮命中风控（熔断）→ 立即停止：这时的失败基本都是平台要求人工验证，越重试越深
+//   3. 连续 AUTO_RETRY_STUCK_ROUNDS 轮失败数没有减少 → 判定重试已无效，立即停止
+//   4. 达到 AUTO_RETRY_MAX_ROUNDS 轮上限 → 停止，剩余失败交给用户手动重试
+// 其中 2、3 会让 popup 提示用户手动点进一个失败 UP 主的主页完成人工验证
+// 第 n 轮等待 5×n 秒（5 / 10 / 15 / 20 …），单轮最长 30 秒；等待期间推送倒计时。
+// 与普通查询一样受 runId 约束：点停止或重新发起查询会立即中断
+async function autoRetryFailed({ mid, runId, sessdata, signal, antiRisk, state, items }) {
+  let round = 0;
+  let stuckRounds = 0;
+
+  while (true) {
+    const failed = items.filter(isFailedItem);
+
+    if (failed.length === 0) return { canceled: false, left: 0 };
+
+    if (round >= AUTO_RETRY_MAX_ROUNDS) {
+      return { canceled: false, left: failed.length, stopped: 'maxRounds' };
+    }
+
+    round++;
+    const waitMs = Math.min(AUTO_RETRY_STEP_MS * round, AUTO_RETRY_MAX_WAIT_MS);
+    const endAt = Date.now() + waitMs;
+
+    while (Date.now() < endAt) {
+      if (isStale(runId)) return { canceled: true };
+      const leftSec = Math.max(1, Math.ceil((endAt - Date.now()) / 1000));
+      pushTaskMessage(runId, {
+        type: 'progress',
+        payload: {
+          mid, runId, stage: 'auto-wait', current: round, total: AUTO_RETRY_MAX_ROUNDS,
+          label: `第 ${round}/${AUTO_RETRY_MAX_ROUNDS} 轮自动重查将在 ${leftSec} 秒后开始（仍有 ${failed.length} 个失败）`
+        }
+      });
+      await sleep(1000);
+    }
+
+    if (isStale(runId)) return { canceled: true };
+
+    const followings = failed.map((i) => ({ mid: i.mid, uname: i.name, face: i.face }));
+    const { canceled, riskStopped } = await queryFollowings({
+      followings, mid, runId, sessdata, signal, antiRisk, state,
+      stopOnRisk: true,
+      label: `第 ${round}/${AUTO_RETRY_MAX_ROUNDS} 轮自动重查失败的 UP 主`,
+      onItem: async (item) => {
+        const idx = items.findIndex((x) => x.mid === item.mid);
+        if (idx >= 0) items[idx] = item;
+        // 重查成功的条目即时写回，避免中途关闭 popup 时结果丢失
+        if (!item.error) await patchCachedItem(item.mid, item);
+      }
+    });
+
+    if (canceled) return { canceled: true };
+
+    // 本轮命中风控熔断：不再冷却续跑，直接停止重查并交给用户完成人工验证
+    if (riskStopped) {
+      return { canceled: false, left: items.filter(isFailedItem).length, stopped: 'risk' };
+    }
+
+    // 这一轮救回了多少？连续几轮颗粒无收就说明再重试也没用
+    const left = items.filter(isFailedItem).length;
+    stuckRounds = left < failed.length ? 0 : stuckRounds + 1;
+    if (stuckRounds >= AUTO_RETRY_STUCK_ROUNDS) {
+      return { canceled: false, left, stopped: 'stuck' };
+    }
+  }
+}
+
+// 停止重查时给用户的手动操作指引（风控熔断与「连续无进展」共用同一套动作）
+const MANUAL_VERIFY_HINT = '请点击列表中任意一个「查询失败」的 UP 主进入其主页，'
+  + '在打开的 B 站页面里完成人工操作验证（这一步程序无法代替你），然后回来点「N 个失败」重新查询。';
+
+// 自动重查提前结束时给用户的可操作提示，写入 task.notice 由 popup 展示
+function buildAutoRetryNotice({ left, stopped }) {
+  if (stopped === 'risk') {
+    return `自动重查已停止：本轮命中 B 站风控拦截，继续重试只会让风控越撞越深，`
+      + `仍有 ${left} 个 UP 主查询失败。${MANUAL_VERIFY_HINT}`;
+  }
+  if (stopped === 'stuck') {
+    return `自动重查已停止：连续 ${AUTO_RETRY_STUCK_ROUNDS} 轮失败数没有减少，`
+      + `仍有 ${left} 个 UP 主查询失败。这通常是 B 站要求人工操作验证，程序无法自行通过。`
+      + MANUAL_VERIFY_HINT;
+  }
+  return `自动重查已达 ${AUTO_RETRY_MAX_ROUNDS} 轮上限，仍有 ${left} 个 UP 主查询失败。`
+    + '可在列表里点「N 个失败」手动重试，或稍后再执行一次完整查询。';
+}
+
 // 启动一次查询：每次调用都会让上一次运行失效
-// mode='full'  全量查询：拉关注列表 → 逐条查更新 → 整体覆盖写缓存
+// mode='full'  全量查询：拉关注列表 → 逐条查更新 → 整体覆盖写缓存 →（开启时）循环重查失败项
 // mode='retry' 批量重试：只挑缓存里「查询失败」的条目重查 → 逐条写回缓存
 // 重试放在后台跑（而不是 popup 里循环），这样关闭 popup 后任务仍会继续，
 // 重新打开时也能从 task 状态里看到它正在跑
@@ -449,41 +784,17 @@ async function runTask(mid, mode = 'full') {
   task.startedAt = Date.now();
   task.finishedAt = 0;
   task.error = null;
+  task.notice = null;
   broadcastTaskState();
 
   const collectedItems = [];
-
-  // 所有推送都带上 mid / runId，popup 端据此过滤，避免切换 UID 时数据串台
-  const push = (msg) => {
-    if (isStale(runId)) return;
-    chrome.runtime.sendMessage(msg).catch(() => {});
-  };
-
-  // ---- 组 2：风控冷却 ----
-  // 命中风控后暂停整个队列并倒计时，而不是继续发请求把风控越撞越深
-  let cooldownHit = 0;
-  const cooldown = async (current, total) => {
-    const waitMs = COOLDOWN.minMs + Math.random() * (COOLDOWN.maxMs - COOLDOWN.minMs);
-    const endAt = Date.now() + waitMs;
-
-    while (Date.now() < endAt) {
-      if (isStale(runId)) return;
-      const left = Math.max(1, Math.ceil((endAt - Date.now()) / 1000));
-      push({
-        type: 'progress',
-        payload: {
-          mid, runId, stage: 'cooldown', current, total, etaMs: 0,
-          label: `触发 B 站风控，${left} 秒后自动继续（第 ${cooldownHit} 次）`
-        }
-      });
-      await sleep(1000);
-    }
-  };
+  // 整个任务共享的风控冷却计数：自动重查的每一轮都算在同一次任务里
+  const state = { cooldownHit: 0 };
 
   try {
     const antiRisk = await getAntiRiskConfig();
+    const auto = await getAutoConfig();
     pacingEnabled = antiRisk.pacing;
-    const concurrency = antiRisk.concurrency;
 
     // 重试模式的待办清单直接取自缓存里的失败条目，无需再拉关注列表
     let followings;
@@ -510,128 +821,28 @@ async function runTask(mid, mode = 'full') {
 
     if (!isRetry) {
       followings = await fetchFollowings(mid, sessdata, signal, (p) => {
-        push({ type: 'progress', payload: { mid, runId, stage: 'followings', ...p } });
+        pushTaskMessage(runId, { type: 'progress', payload: { mid, runId, stage: 'followings', ...p } });
       });
     }
 
     if (isStale(runId)) return { ok: true, canceled: true };
 
-    const total = followings.length;
-    let processed = 0;
-    let sincePause = 0;
-    const queryStartAt = Date.now();
-
-    // 推送"开始查询"进度（含 ETA 估算）
-    const avgMs = 200; // 假设平均 200ms/请求
-    const etaMs = Math.round((total / concurrency) * avgMs);
-    push({
-      type: 'progress',
-      payload: {
-        mid, runId, stage: 'stats', current: 0, total, etaMs, startedAt: queryStartAt,
-        label: isRetry ? '正在重新查询失败的 UP 主' : '查询更新时间'
+    const { canceled, items } = await queryFollowings({
+      followings, mid, runId, sessdata, signal, antiRisk, state,
+      label: isRetry ? '正在重新查询失败的 UP 主' : '查询更新时间',
+      // 边查边写回缓存：中途关闭 popup 或 Service Worker 被回收时，已完成的进度不会丢。
+      // 除成功项外，「无公开动态」的标记也要补写进缓存，否则老数据下次仍会被算作失败项
+      onItem: async (item) => {
+        collectedItems.push(item);
+        if (isRetry && (!item.error || item.noDynamic)) await patchCachedItem(item.mid, item);
       }
     });
 
-    for (let i = 0; i < total; i += concurrency) {
-      if (isStale(runId)) return { ok: true, canceled: true };
+    if (canceled) return { ok: true, canceled: true };
 
-      let batch = followings.slice(i, i + concurrency);
-      // 用 Map 累积每一轮的结果：命中风控时只重试被拦截的条目，
-      // 同一批里已经成功的条目必须先收好，否则会在下一轮被整体丢弃
-      const settledItems = new Map();
-
-      while (true) {
-        const settled = await Promise.all(batch.map(async (up) => {
-          const base = { mid: up.mid, name: up.uname, face: up.face };
-          try {
-            const stat = await fetchUpLatestWithRetry(up.mid, sessdata, signal);
-            return {
-              item: {
-                ...base,
-                lastVideoAt: stat.lastAt,
-                lastVideoName: stat.lastName,
-                type: stat.type,
-                isTop: stat.isTop,
-                polluted: stat.polluted || false,
-                source: stat.source
-              }
-            };
-          } catch (e) {
-            if (e.isRiskControl) return { risk: true, up, base };
-            return { item: { ...base, error: e.message } };
-          }
-        }));
-
-        for (const s of settled) {
-          if (!s.risk) settledItems.set(s.item.mid, s.item);
-        }
-
-        const risked = settled.filter((s) => s.risk);
-
-        if (risked.length === 0) break;
-
-        // 熔断开关关闭时退化为旧行为：把风控直接当作这几条查询失败
-        if (!antiRisk.cooldown) {
-          for (const s of risked) {
-            settledItems.set(s.base.mid, { ...s.base, error: 'B 站风控拦截，请稍后再试' });
-          }
-          break;
-        }
-
-        cooldownHit++;
-        if (cooldownHit > COOLDOWN.maxHits) {
-          throw new Error(`连续 ${COOLDOWN.maxHits} 次触发 B 站风控，已中止本次查询，请稍后再试`);
-        }
-
-        await cooldown(processed, total);
-        if (isStale(runId)) return { ok: true, canceled: true };
-
-        batch = risked.map((s) => s.up);
-      }
-
-      // 按原始批次顺序输出，保证结果顺序稳定
-      const results = followings
-        .slice(i, i + concurrency)
-        .map((up) => settledItems.get(up.mid))
-        .filter(Boolean);
-
-      if (isStale(runId)) return { ok: true, canceled: true };
-
-      for (const item of results) {
-        collectedItems.push(item);
-        // 重试模式边跑边落盘：中途关闭 popup 或 Service Worker 被回收时，已完成的进度不会丢
-        if (isRetry && !item.error) await patchCachedItem(item.mid, item);
-        push({ type: 'item', payload: { mid, runId, item } });
-      }
-
-      processed += results.length;
-      // 推送进度 + 动态 ETA
-      const elapsed = Date.now() - queryStartAt;
-      const avgPerItem = elapsed / processed;
-      const remaining = Math.max(0, Math.round((total - processed) * avgPerItem));
-      push({
-        type: 'progress',
-        payload: {
-          mid, runId, stage: 'stats', current: processed, total, etaMs: remaining,
-          label: isRetry ? '正在重新查询失败的 UP 主' : '查询更新时间'
-        }
-      });
-
-      await sleep(nextInterval());
-
-      // 组 1：每处理满一批插入一次随机停顿，打断长时间恒定的请求节奏
-      sincePause += results.length;
-      if (antiRisk.pacing && sincePause >= PACING.pauseEvery) {
-        sincePause = 0;
-        await sleep(PACING.pauseMin + Math.random() * (PACING.pauseMax - PACING.pauseMin));
-      }
-    }
-
-    if (isStale(runId)) return { ok: true, canceled: true };
-
-    // 重试模式的结果已在循环里逐条写回，这里只统计成败
+    // 重试模式的结果已在查询过程中逐条写回，这里只统计成败
     if (isRetry) {
-      const okCount = collectedItems.filter((i) => !i.error).length;
+      const okCount = items.filter((i) => !i.error).length;
       task.status = 'done';
       task.finishedAt = Date.now();
       broadcastTaskState();
@@ -642,6 +853,20 @@ async function runTask(mid, mode = 'full') {
     }
 
     await saveCache(collectedItems, mid);
+
+    // 全量查询到此结束：自动更新从这一刻重新起算一个完整周期。
+    // 放在自动重查之前，是因为「后续补查失败项」不属于一次完整更新，不应把周期推后；
+    // 重排失败也不该影响已经拿到的查询结果，所以吞掉异常
+    await restartAutoUpdateCountdown().catch(() => {});
+
+    // 自动重查失败项：全量查询跑完后循环补查失败条目，直到失败数归零（受轮数与无进展上限约束）
+    if (auto.autoRetry) {
+      const retried = await autoRetryFailed({
+        mid, runId, sessdata, signal, antiRisk, state, items: collectedItems
+      });
+      if (retried.canceled) return { ok: true, canceled: true };
+      if (retried.stopped) task.notice = buildAutoRetryNotice(retried);
+    }
 
     task.status = 'done';
     task.finishedAt = Date.now();
@@ -755,6 +980,96 @@ async function unfollowBatch(mids) {
   return { ok: true, succeeded, failed };
 }
 
+// ---- 自动更新：定时唤起 Service Worker 跑一次全量查询 ----
+// MV3 的 Service Worker 会被浏览器回收，setTimeout / setInterval 都活不过休眠，
+// 只有 chrome.alarms 能可靠地把 SW 唤醒，所以定时轮询必须走它
+async function syncAutoUpdateAlarm() {
+  const { autoUpdate, intervalMin } = await getAutoConfig();
+  const existing = await chrome.alarms.get(AUTO_ALARM);
+
+  if (!autoUpdate) {
+    if (existing) await chrome.alarms.clear(AUTO_ALARM);
+    return;
+  }
+
+  // 已存在且间隔一致就不动它：Service Worker 每次被唤醒都会执行到这里，
+  // 若无条件重建，计时会被反复重置，自动更新可能永远等不到触发
+  if (existing && existing.periodInMinutes === intervalMin) return;
+
+  await chrome.alarms.clear(AUTO_ALARM);
+  chrome.alarms.create(AUTO_ALARM, { periodInMinutes: intervalMin, delayInMinutes: intervalMin });
+}
+
+// 让「自动更新」从此刻重新起算一个完整周期。
+// 调用时机只有一个：一次全量查询跑完（写完缓存）之后、失败项自动重查开始之前 ——
+// 即计时锚点是「上一次完整更新的完成时刻」，后续的自动重查不计入，不会把周期再次推后。
+// 这里必须显式 clear + create，不能走 syncAutoUpdateAlarm 的「已存在就跳过」分支
+async function restartAutoUpdateCountdown() {
+  const { autoUpdate, intervalMin } = await getAutoConfig();
+  if (!autoUpdate) return;
+  await chrome.alarms.clear(AUTO_ALARM);
+  chrome.alarms.create(AUTO_ALARM, { periodInMinutes: intervalMin, delayInMinutes: intervalMin });
+}
+
+// 定时器到点：当前已有任务在跑就跳过本轮（两次运行会互相覆盖结果），
+// 未设置 UID 时也不做任何事
+async function startAutoUpdate() {
+  if (task.status === 'running') return;
+  const mid = await getStoredUid();
+  if (!mid) return;
+  runTask(mid);
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === AUTO_ALARM) startAutoUpdate();
+});
+
+// 设置变动时重排定时器；只认自动化设置本身的变化，
+// 否则 popup 每次写回「隐藏异常」偏好都会把自动更新的计时重置
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes[PREFS_KEY]) return;
+  const before = JSON.stringify((changes[PREFS_KEY].oldValue || {}).auto || null);
+  const after = JSON.stringify((changes[PREFS_KEY].newValue || {}).auto || null);
+  if (before !== after) syncAutoUpdateAlarm();
+});
+
+// 浏览器启动 / 扩展更新后，SW 里的定时器会丢失，需要重建；
+// 图标的点击行为也重新同步一次（侧边栏偏好来自上一次会话）
+chrome.runtime.onStartup.addListener(() => { syncAutoUpdateAlarm(); syncActionMode(); });
+chrome.runtime.onInstalled.addListener(() => { syncAutoUpdateAlarm(); syncActionMode(); });
+syncAutoUpdateAlarm();
+syncActionMode();
+
+// ---- 界面形态记忆：上次用的是侧边栏，则下次点击工具栏图标直接进侧边栏 ----
+// 列表与侧边栏共用同一个页面，由 popup.js 检测宿主后把形态写进 UI_KEY，这里负责让
+// 工具栏图标的行为跟着变：有 action popup 时点击只会弹 popup，所以要先把 popup 摘掉，
+// 再打开 sidePanel 的 openPanelOnActionClick，点击图标才会直接展开侧边栏
+function getUiPrefs() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([UI_KEY], (d) => resolve(d[UI_KEY] || {}));
+  });
+}
+
+// setPanelBehavior 需要 Chrome 116+；不支持时保持 popup 行为，功能降级但不会点了没反应
+async function syncActionMode() {
+  const { lastMode } = await getUiPrefs();
+  const canPanel = Boolean(chrome.sidePanel && chrome.sidePanel.setPanelBehavior);
+  const wantPanel = lastMode === 'panel' && canPanel;
+
+  try {
+    chrome.action.setPopup({ popup: wantPanel ? '' : POPUP_PATH });
+    if (canPanel) await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: wantPanel });
+  } catch (e) {
+    // 同步失败就退回默认的 popup 行为，避免图标点击后什么都不发生
+    try { chrome.action.setPopup({ popup: POPUP_PATH }); } catch (e2) { /* 忽略 */ }
+  }
+}
+
+// 界面形态变化时立刻跟随（popup.js 每次打开都会写入当前形态）
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[UI_KEY]) syncActionMode();
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // start / reset 语义统一：启动新任务，旧任务自动失效
   if (msg.type === 'start' || msg.type === 'reset') {
@@ -766,6 +1081,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     task.status = 'idle';
     task.mid = null;
     task.error = null;
+    task.notice = null;
     task.finishedAt = Date.now();
     broadcastTaskState();
     sendResponse({ ok: true });

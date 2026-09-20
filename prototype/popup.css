@@ -700,6 +700,8 @@ main::-webkit-scrollbar-thumb:hover {
 .group[data-group="silent"]  { --level-color: var(--state-silent); }
 .group[data-group="retired"] { --level-color: var(--state-retired); }
 .group[data-group="error"]   { --level-color: var(--state-danger); }
+/* 「无公开动态」不是停更等级也不是失败，用中性色，避免被误读成红色告警 */
+.group[data-group="noDynamic"] { --level-color: var(--text-tertiary); }
 
 /* === 列表项 === */
 .up-item {
@@ -806,6 +808,11 @@ main::-webkit-scrollbar-thumb:hover {
   color: var(--state-danger);
 }
 
+/* 无公开动态属于中性提示，用弱化色而非失败红 */
+.tag-muted {
+  color: var(--text-tertiary);
+}
+
 /* === 时间 === */
 .up-meta {
   display: flex;
@@ -824,8 +831,9 @@ main::-webkit-scrollbar-thumb:hover {
   white-space: nowrap;
 }
 
-/* 失败原因可能很长，允许收缩并省略 */
-.up-time.is-error-msg {
+/* 失败原因 / 无公开动态文案可能较长，允许收缩并省略 */
+.up-time.is-error-msg,
+.up-time.is-muted-msg {
   flex: 1;
   min-width: 0;
   overflow: hidden;

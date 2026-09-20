@@ -14,8 +14,17 @@ body.options-page {
   background: var(--bg-base);
 }
 
+/* popup.css 里的 `header { ... }` 元素选择器会一并命中本页的页头，
+   带出白底 + 下边框 + 阴影，看起来像残留的 popup 头部；这里还原为普通标题区 */
+body.options-page header {
+  padding: 0;
+  background: none;
+  border-bottom: 0;
+  box-shadow: none;
+}
+
 .wrap {
-  max-width: 720px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: var(--sp-6) var(--sp-4);
 }
@@ -45,35 +54,34 @@ body.options-page {
   color: var(--text-tertiary);
 }
 
-/* === 说明区 === */
-.intro {
-  margin-bottom: var(--sp-4);
-  padding: var(--sp-4);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  background: var(--surface);
+/* === 分组标题 ===
+   原先每个分组用一张独立的说明卡承载背景信息，导致页面过长；
+   现在背景拆进各卡片副标题，分组只剩一行标题 + 一行备注。
+   注意：类名不能叫 group-head —— popup.css 里的 .group-head 是列表吸顶分组头
+   （sticky + 负外边距 + 不透明背景），复用类名会被那套样式命中 */
+.section-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
 }
 
-.intro-title {
-  margin-bottom: var(--sp-2);
+.section-head:not(:first-child) {
+  margin-top: var(--sp-4);
+}
+
+.section-title {
   font-size: var(--fs-base);
   font-weight: 600;
   color: var(--text-primary);
 }
 
-.intro-text {
+.section-note {
+  flex: 1;
+  min-width: 0;
   font-size: var(--fs-sm);
-  line-height: 1.75;
-  color: var(--text-secondary);
-}
-
-.intro-note {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-3);
-  border-top: 1px dashed var(--border);
-  font-size: var(--fs-sm);
-  line-height: 1.75;
-  color: var(--state-stale);
+  color: var(--text-tertiary);
 }
 
 code {
@@ -86,13 +94,18 @@ code {
 }
 
 /* === 开关卡片 === */
+/* 双栏网格：宽屏下一行放两张卡，页面高度约为原来的 1/2；
+   窄屏（< 900px）回落为单列，卡片内的利弊说明在 < 640px 时再改为上下堆叠 */
 .switch-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-3);
 }
 
 .switch-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
   padding: var(--sp-4);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -222,12 +235,56 @@ code {
   box-shadow: inset 0 0 0 2px var(--brand-glow);
 }
 
+/* === 设置项内的字段行（自动更新的频率输入）=== */
+.opt-field {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.opt-field-label {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+.opt-number {
+  width: 88px;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-alt);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.opt-number:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.opt-number:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.opt-field-unit {
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+
 /* === 利弊说明 === */
 .pros-cons {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--sp-3);
-  margin-top: var(--sp-4);
+  /* 卡片在网格里会被拉伸到与同行最高的卡片等高：让利弊区块吃掉剩余高度，
+     两块底色随之填满卡片（而不是在卡片中段留出一块空白） */
+  flex: 1;
   padding-top: var(--sp-3);
   border-top: 1px solid var(--border);
 }
@@ -267,7 +324,8 @@ code {
 
 .pc-block ul {
   padding-left: var(--sp-4);
-  line-height: 1.75;
+  /* 双栏后每栏文字变窄、折行变多，行高收到 1.6 仍留有足够呼吸感 */
+  line-height: 1.6;
   color: var(--text-secondary);
 }
 
@@ -310,9 +368,10 @@ code {
   color: var(--text-primary);
 }
 
+/* 内容区加宽后单行四项会显得空荡，改为一行两组「标签 + 值」 */
 .about-list {
   display: grid;
-  grid-template-columns: 72px 1fr;
+  grid-template-columns: 72px minmax(0, 1fr) 72px minmax(0, 1fr);
   gap: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm);
 }
@@ -342,9 +401,21 @@ code {
 }
 
 /* === 窄屏适配 === */
+/* 单栏宽度不足以放下两张卡时回落为一行一张 */
+@media (max-width: 900px) {
+  .switch-list {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 卡片已经很窄时，利弊说明改为上下堆叠，避免每行只剩几个字 */
 @media (max-width: 640px) {
   .pros-cons {
     grid-template-columns: 1fr;
+  }
+
+  .about-list {
+    grid-template-columns: 72px minmax(0, 1fr);
   }
 }
 

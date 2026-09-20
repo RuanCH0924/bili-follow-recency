@@ -94,10 +94,13 @@ cd bili-follow-recency
 
 | 文件 | 职责 | 约束 |
 | --- | --- | --- |
-| `background.js` | Service Worker | 所有网络请求、Cookie 读取、任务状态机、缓存读写、批量取关 |
+| `background.js` | Service Worker | 所有网络请求、Cookie 读取、任务状态机、缓存读写、批量取关、自动化定时 |
 | `popup.js` | 弹出层逻辑 | 仅负责 DOM 渲染、排序、过滤、多选、UI 状态 |
 | `popup.css` | 弹出层样式 | 使用 CSS 变量（定义于 `:root`）取色，不写死色值 |
+| `options.html/js/css` | 设置页 | 只读写 `bili_prefs` 偏好，不直接发起任何 B 站请求 |
 | `manifest.json` | 扩展配置 | 新增权限需在 PR 中说明必要性 |
+
+> 偏好键 `bili_prefs` 由 popup（异常过滤）与设置页（反风控 / 自动化）**合并写入**，任一处写入前都必须先读出已有内容，否则会覆盖另一处保存的字段。
 
 ### 通信约定
 
@@ -108,20 +111,37 @@ popup 与 background **只能**通过 `chrome.runtime.sendMessage` 通信，消�
 | popup → background | `start` / `reset` | 启动新任务（两者语义一致，旧任务会因 `runId` 失效而自动退出） |
 | popup → background | `cancel` | 取消当前任务并中止在途请求 |
 | popup → background | `query-state` | 查询当前任务状态 |
+| popup → background | `retry-failed` | 批量重试缓存中所有「查询失败」的条目（有任务在跑时拒绝） |
 | popup → background | `refresh-one` | 单项刷新，只重查一个 UP 主（`mid`） |
 | popup → background | `unfollow` | 批量取关，`mids` 为 UID 数组 |
 | background → popup | `item` | 单个 UP 主的查询结果，payload 为 `{ mid, runId, item }` |
-| background → popup | `progress` | 查询进度，payload 含 `mid` / `runId` / `stage` / `current` / `total` / `etaMs` |
-| background → popup | `task-state` | 任务状态变更，payload 为 `{ status, mid, runId, error }` |
+| background → popup | `progress` | 查询进度，payload 含 `mid` / `runId` / `stage` / `current` / `total` / `etaMs`；`stage` 取值 `followings` / `stats` / `cooldown`（风控冷却）/ `auto-wait`（自动重查倒计时） |
+| background → popup | `task-state` | 任务状态变更，payload 为 `{ status, kind, mid, runId, error, notice }`（`notice` 用于「任务成功结束但需用户手动处理」的提示，如自动重查无进展时的人工验证指引） |
 | background → popup | `unfollow-progress` | 批量取关进度，payload 为 `{ current, total, mid, ok, error }` |
 
 **重要**：所有 background → popup 的推送都必须携带 `mid`（和 `runId`），popup 端据此过滤，否则切换 UID 时会出现数据串台。
 
 新增消息类型时请同步更新本表与 README。
 
+### 数据字段约定
+
+- 「查询失败」= `error` 非空，或压根没有 `lastVideoAt`
+- 「无公开动态」= `noDynamic: true` + `error` 文案，属于「查到了但没内容」，**不得**计入失败统计与重查队列
+- 判定统一走 `background.js` 的 `isFailedItem()` 与 `popup.js` 的 `isErrorItem()` / `isNoDynamicItem()`，不要在别处另行判断。两边的口径必须一致 —— 否则出现「列表里看不出它、重试队列里却算上它」这类对不上账的计数
+
+### 界面形态（弹窗 / 侧边栏）
+
+形态记在 `bili_ui`（`{ lastMode: 'popup' | 'panel' }`），由 popup 页在检测到自己运行在哪种宿主后写入；`background.js` 的 `syncActionMode()` 据此决定工具栏图标的点击行为 —— 侧边栏形态下要摘掉 `action` 的 popup 并打开 `sidePanel.setPanelBehavior({ openPanelOnActionClick: true })`，否则有 popup 时点击只会弹窗、不会展开侧边栏。改形态检测（`popup.js` 的 `IS_PANEL`）时请一并确认这条链路。
+
 ### 请求频率
 
-请勿提高 `CONCURRENCY` 或降低 `REQUEST_INTERVAL`。当前值（并发 5 / 间隔 80ms）是在可用性与风控风险之间权衡后的结果，擅自提高可能导致使用者的账号被限流。
+请勿降低 `REQUEST_INTERVAL`（80ms）或绕过用户设置的并发数。并发 1 ~ 5 与间隔 80ms 是在可用性与风控风险之间权衡后的结果，擅自提高可能导致使用者的账号被限流。
+
+自动化的默认等待（自动更新最短 5 分钟、自动重查每轮 5×n 秒且单轮封顶 30 秒）同样不得缩短——它们直接决定单位时间的请求密度。自动重查的收敛条件（命中风控即停、最多 10 轮、连续 2 轮无进展即停）也不要放宽：失败原因往往是平台要求人工验证，继续重试既无效又只会加深风控。
+
+自动重查通过 `queryFollowings({ stopOnRisk: true })` 让风控直接停轮（回报 `riskStopped`），全量查询阶段则保持「冷却后继续」；改动这段逻辑时请保持这个区分，并确保停轮时同批已成功的结果仍会推送与落盘。
+
+自动更新的计时锚点固定为「**上一次全量查询完成**」的时刻（由 `restartAutoUpdateCountdown()` 在写缓存后、失败项自动重查之前重排）：不要改成以任务开始时刻起算，也不要把补查失败项的耗时计入周期。
 
 取关请求必须保持**串行**且不缩短 `UNFOLLOW_INTERVAL`（400ms）——写操作比读操作更容易触发风控。
 

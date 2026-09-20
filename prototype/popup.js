@@ -4,6 +4,8 @@
 // 默认 UID 留空，由用户首次使用时自行填写
 const DEFAULT_UID = '';
 const UID_KEY = 'bili_uid';
+// 界面形态记忆（上次用的是弹窗还是侧边栏）；注意：此键必须与 background.js 中的 UI_KEY 保持一致
+const UI_KEY = 'bili_ui';
 // 注意：此键必须与 background.js 中的 CACHE_KEY 保持一致
 const CACHE_KEY = 'bili_follow_cache';
 // 用户偏好（排序方向 / 异常过滤）
@@ -23,10 +25,15 @@ const GROUPS = [
   { key: 'dormant', label: '长期断更 · 3 ~ 6 个月',   maxDays: 182 },
   { key: 'silent',  label: '疑似退圈 · 6 个月 ~ 1 年', maxDays: 365 },
   { key: 'retired', label: '基本退圈 · 1 年以上',      maxDays: Infinity },
+  { key: 'noDynamic', label: '无公开动态',            maxDays: null },
   { key: 'error',   label: '查询失败',                maxDays: null }
 ];
 
 const GROUP_LABEL = new Map(GROUPS.map(g => [g.key, g.label.split(' · ')[0]]));
+
+// 后台判定「该 UP 主确实没有任何公开动态」时的固定文案（与 background.js 的 NO_DYNAMIC_MESSAGE 一致）。
+// 老版本缓存里只有文案、没有 noDynamic 标记，这里兜底识别，避免升级后这些条目仍被当作查询失败
+const NO_DYNAMIC_MESSAGE = '该 UP 主无公开动态';
 
 // ---- 内联图标（统一 currentColor，避免 emoji 跨平台渲染不一致）----
 const ICON = {
@@ -35,6 +42,8 @@ const ICON = {
   eyeOff: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>',
   warn: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>',
   info: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>',
+  // 侧边栏模式下用于切回弹窗：分隔线放在左侧，与 popup 的侧边栏按钮（分隔线在右）互为镜像
+  dock: '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>',
   inbox: '<svg class="icon icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg>'
 };
 
@@ -66,6 +75,11 @@ const IS_PANEL = !viewportIsPopupSized;
 
 if (IS_PANEL) {
   document.body.classList.add('is-panel');
+  // 侧边栏模式下这颗按钮改为「切回弹窗」：点击后记下形态，background 会把
+  // 工具栏图标恢复成弹 popup（不支持 setPanelBehavior 的旧版浏览器不会有此形态）
+  $panelBtn.innerHTML = ICON.dock;
+  $panelBtn.title = '切换回弹窗模式：下次点击工具栏图标将以弹窗打开';
+  $panelBtn.setAttribute('aria-label', '切换回弹窗模式');
 } else if (!chrome.sidePanel || !chrome.windows) {
   $panelBtn.classList.add('is-hidden');
 }
@@ -113,8 +127,14 @@ function applyFilter() {
   $filterBtn.classList.toggle('chip-is-active', hideErrorItems);
 }
 
-// 判断一个 item 是否为异常
+// 「无公开动态」是查到了结果为空（账号注销 / 被封禁 / 从未投稿），不属于异常
+function isNoDynamicItem(item) {
+  return Boolean(item.noDynamic) || item.error === NO_DYNAMIC_MESSAGE;
+}
+
+// 判断一个 item 是否为异常（查询失败）
 function isErrorItem(item) {
+  if (isNoDynamicItem(item)) return false;
   return Boolean(item.error) || !item.lastVideoAt;
 }
 
@@ -176,7 +196,7 @@ function renderUpdatedAt() {
 // 单项刷新 / 批量重试完成后统一重算一次，保证列表里所有时间基于同一时刻
 function refreshTimeLabels() {
   for (const entry of itemIndex.values()) {
-    if (!entry.li || isErrorItem(entry.item)) continue;
+    if (!entry.li || isErrorItem(entry.item) || isNoDynamicItem(entry.item)) continue;
     const time = entry.li.querySelector('.up-time');
     if (time) time.textContent = formatTimeAgo(entry.item.lastVideoAt);
   }
@@ -290,6 +310,7 @@ function formatTimeAgo(ts) {
 
 // 判断一个 item 属于哪个停更分组
 function classifyGroup(item) {
+  if (isNoDynamicItem(item)) return 'noDynamic';
   if (isErrorItem(item)) return 'error';
   const days = (Date.now() / 1000 - item.lastVideoAt) / 86400;
   for (const grp of GROUPS) {
@@ -364,7 +385,9 @@ function buildItem(item) {
   name.textContent = item.name;
   nameRow.appendChild(name);
 
-  if (item.error) {
+  if (isNoDynamicItem(item)) {
+    addTag(nameRow, '无公开动态', 'tag-muted', '该 UP 主没有任何公开动态，无法判断停更时长');
+  } else if (item.error) {
     addTag(nameRow, '查询失败', 'tag-warn');
   } else {
     if (item.type) addTag(nameRow, item.type, 'tag-type');
@@ -378,7 +401,12 @@ function buildItem(item) {
 
   const time = document.createElement('span');
   time.className = 'up-time';
-  if (item.error) {
+  if (isNoDynamicItem(item)) {
+    // 这类条目不是失败，用中性色呈现，避免和「查询失败」的红色混淆
+    time.classList.add('is-muted-msg');
+    time.textContent = NO_DYNAMIC_MESSAGE;
+    time.title = '账号已注销、被封禁，或从未发布过公开内容';
+  } else if (item.error) {
     time.classList.add('is-error-msg');
     time.textContent = item.error;
     time.title = item.error;
@@ -816,7 +844,8 @@ function buildCsv() {
     const notes = [];
     if (item.isTop) notes.push('置顶内容');
     if (item.polluted) notes.push('upstat 兜底，可能不准');
-    if (item.error) notes.push(item.error);
+    if (isNoDynamicItem(item)) notes.push('无公开动态');
+    else if (item.error) notes.push(item.error);
 
     rows.push([
       item.name,
@@ -864,12 +893,21 @@ $settingsBtn.addEventListener('click', () => {
   window.close();
 });
 
-// ---- 侧边栏 ----
-if (!IS_PANEL && chrome.sidePanel && chrome.windows) {
+// ---- 侧边栏 / 弹窗形态切换 ----
+// 侧边栏模式：这颗按钮用于切回弹窗（记住形态后，工具栏图标恢复为弹 popup）
+// 弹窗模式：这颗按钮用于打开侧边栏（记住形态后，工具栏图标改为直接开侧边栏）
+if (IS_PANEL) {
+  $panelBtn.addEventListener('click', async () => {
+    await saveUiMode('popup');
+    showNotice('已切换为弹窗模式，点击工具栏图标将以弹窗打开');
+  });
+} else if (chrome.sidePanel && chrome.windows) {
   $panelBtn.addEventListener('click', async () => {
     try {
       const win = await chrome.windows.getCurrent();
+      // 先打开侧边栏：sidePanel.open 依赖用户手势，不宜在它之前插入额外 await
       await chrome.sidePanel.open({ windowId: win.id });
+      saveUiMode('panel'); // 记住形态，下次点工具栏图标直接开侧边栏
       window.close(); // 避免 popup 与侧边栏同时存在
     } catch (e) {
       showAlert(`无法打开侧边栏：${(e && e.message) || '未知错误'}`);
@@ -995,6 +1033,9 @@ function attachStreamListener() {
       } else if (p.stage === 'cooldown') {
         // 风控冷却：进度条停在当前位置，文案显示倒计时，避免看起来像卡死
         showProgress(p.label, p.current, p.total, '');
+      } else if (p.stage === 'auto-wait') {
+        // 自动重查失败项的等待倒计时：与风控冷却一样只更新文案
+        showProgress(p.label, p.current, p.total, '');
       }
     } else if (msg.type === 'unfollow-progress') {
       const p = msg.payload;
@@ -1019,6 +1060,8 @@ function attachStreamListener() {
         }
         // 流式查询跨越数分钟时，各行时间基于不同时刻算出，这里统一重算
         refreshTimeLabels();
+        // 自动重查提前收工时给出可操作提示（例如需要手动过 B 站的人工验证）
+        if (t.notice) showAlert(t.notice);
       } else if (t.status === 'error') {
         setBusy(false);
         hideProgress();
@@ -1096,6 +1139,15 @@ async function loadStoredUid() {
 async function saveStoredUid(uid) {
   return new Promise((resolve) => {
     chrome.storage.local.set({ [UID_KEY]: uid }, resolve);
+  });
+}
+
+// ---- 界面形态记忆 ----
+// 记住这次是在弹窗还是侧边栏里打开的；上次是侧边栏时，background 的 syncActionMode
+// 会把工具栏图标改成直接展开侧边栏（这里只负责记录）
+function saveUiMode(mode) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [UI_KEY]: { lastMode: mode } }, resolve);
   });
 }
 
@@ -1193,6 +1245,9 @@ async function bootstrap() {
   syncBulkBar();
   buildGroupShell();
 
+  // 记住本次的界面形态（弹窗 / 侧边栏）：下次点击工具栏图标时据此决定是弹 popup 还是直接开侧边栏
+  saveUiMode(IS_PANEL ? 'panel' : 'popup');
+
   // 恢复上次的异常过滤偏好
   const prefs = await loadPrefs();
   if (typeof prefs.hideErrorItems === 'boolean') hideErrorItems = prefs.hideErrorItems;
@@ -1247,6 +1302,8 @@ async function bootstrap() {
   } else {
     setBusy(false);
     hideProgress();
+    // 上次任务留下的待办提示（如自动重查停止后需要手动验证）重新打开面板时仍要能看到
+    if (task.notice) showAlert(task.notice);
   }
 }
 

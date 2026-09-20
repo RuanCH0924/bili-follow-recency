@@ -17,19 +17,12 @@
       </div>
     </header>
 
-    <section class="intro">
-      <h2 class="intro-title">反风控设置</h2>
-      <p class="intro-text">
-        B 站的风控系统会对短时间内的大量请求返回
-        <code>-352</code> 错误，表现为部分 UP 主查询失败、列表里出现一堆「查询失败」。
-        下面三项可以降低被拦截的概率，但每一项都有代价，请按需要取舍。
-      </p>
-      <p class="intro-note">
-        这些设置只降低触发概率，<strong>不能保证完全不被风控</strong>。短时间内反复点刷新仍然容易被限制。
-      </p>
-    </section>
-
     <div class="switch-list">
+      <div class="section-head">
+        <h2 class="section-title">反风控</h2>
+        <p class="section-note">短时间内的大量请求会被 B 站风控拦截（-352），四项都只降低概率，不能保证完全不被拦截</p>
+      </div>
+
       <section class="switch-card">
         <div class="switch-head">
           <div class="switch-title">
@@ -97,7 +90,7 @@
         <div class="switch-head">
           <div class="switch-title">
             <h3>风控熔断与自动恢复</h3>
-            <p>遇到风控时暂停整个队列，等冷却后再继续</p>
+            <p>遇到风控时暂停整个队列，冷却 30~60 秒后自动继续</p>
           </div>
           <label class="switch">
             <input type="checkbox" id="opt-cooldown" />
@@ -117,7 +110,7 @@
             <span class="pc-badge">代价</span>
             <ul>
               <li>触发时进度条会停留 30~60 秒（有倒计时文案，不是卡死）</li>
-              <li>单次查询最多冷却 3 次，超过则中止并提示稍后重试</li>
+              <li>单次全量查询最多冷却 3 次，超过则中止并引导你完成人工验证；「自动重新查询失败项」阶段一旦命中风控会直接停止重查，不再冷却续跑</li>
               <li>关闭后，风控会被当作普通查询失败直接跳过</li>
             </ul>
           </div>
@@ -148,6 +141,81 @@
             <ul>
               <li>首次（或缓存丢失时）会额外发起一次 B 站请求</li>
               <li>申请到的 buvid4 会保存在浏览器本地存储中</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <div class="section-head">
+        <h2 class="section-title">自动化</h2>
+        <p class="section-note">两项默认关闭，开启后由扩展在后台自动执行</p>
+      </div>
+
+      <section class="switch-card">
+        <div class="switch-head">
+          <div class="switch-title">
+            <h3>自动更新</h3>
+            <p>按设定频率在后台定期重新查询，频率越高越容易触发风控</p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="opt-autoUpdate" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+
+        <div class="opt-field">
+          <label class="opt-field-label" for="opt-interval">更新频率</label>
+          <input type="number" id="opt-interval" class="opt-number" min="5" max="1440" step="5" />
+          <span class="opt-field-unit">分钟一次</span>
+        </div>
+
+        <div class="pros-cons">
+          <div class="pc-block is-pro">
+            <span class="pc-badge">好处</span>
+            <ul>
+              <li>列表数据保持新鲜，打开 popup 时直接看到最新结果，不用再等一次全量查询</li>
+              <li>「更新于 X 分钟前」的时效提示不会因为搁置太久而失去参考价值</li>
+            </ul>
+          </div>
+          <div class="pc-block is-con">
+            <span class="pc-badge">间隔说明</span>
+            <ul>
+              <li><strong>最短 5 分钟</strong>，最长 1440 分钟（24 小时）；默认 <strong>60 分钟</strong></li>
+              <li>计时从<strong>上一次完整查询结束</strong>的那一刻起算，随后补查失败项的时间不计入</li>
+              <li>首次开启或修改频率后，从保存设置的那一刻起算一个完整周期</li>
+              <li>浏览器未运行时不会执行；到点时若已有查询正在进行，本轮自动跳过，等下一个周期</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="switch-card">
+        <div class="switch-head">
+          <div class="switch-title">
+            <h3>自动重新查询失败项</h3>
+            <p>全部查询结束后自动补查失败的 UP 主，最多 10 轮</p>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="opt-autoRetry" />
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </label>
+        </div>
+        <div class="pros-cons">
+          <div class="pc-block is-pro">
+            <span class="pc-badge">好处</span>
+            <ul>
+              <li>因限流、网络抖动而失败的条目会被自动救回，不必手动点「N 个失败」重试</li>
+              <li>每轮只重查仍然失败的条目，已经成功的条目不会重复请求</li>
+              <li>「无公开动态」的 UP 主不算失败，不会被反复重查</li>
+            </ul>
+          </div>
+          <div class="pc-block is-con">
+            <span class="pc-badge">重查规则</span>
+            <ul>
+              <li>第 1 轮在全部查询结束后 <strong>5 秒</strong>开始，之后每轮递增 5 秒（10 / 15 / 20…），<strong>单轮最长 30 秒</strong></li>
+              <li>最多重查 <strong>10 轮</strong>；失败数归零则提前结束</li>
+              <li>本轮<strong>命中风控（熔断）</strong>，或<strong>连续 2 轮失败数都没有减少</strong>时立即停止，并提示你手动点击任意一个「查询失败」的 UP 主进入其主页，完成 B 站的人工操作验证</li>
+              <li>等待期间进度条会显示「第几轮 + 倒计时」，可随时点停止按钮中断</li>
             </ul>
           </div>
         </div>
